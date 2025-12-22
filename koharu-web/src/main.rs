@@ -125,7 +125,7 @@ struct TranslateRequest {
     config: Option<Text<String>>,         // 配置字符串，前端可能会传递，但我们会忽略
 }
 
-// API端点：图像翻译
+// API端点：图像翻译 - 非流式响应版本
 async fn translate_image(
     data: Data<AppState>,          // 应用程序状态，包含模型和渲染器
     MultipartForm(form): MultipartForm<TranslateRequest>,  // 解析后的请求表单数据
@@ -219,7 +219,6 @@ async fn translate_image(
     data.renderer.render(&mut document, None, Default::default())
         .map_err(|e| actix_web::error::ErrorInternalServerError(e))?;
 
-    // 步骤8：返回结果
     // 获取渲染后的图像
     let rendered_image = document.rendered.as_ref()
         .ok_or_else(|| actix_web::error::ErrorInternalServerError("Rendered image not found"))?;
@@ -234,6 +233,154 @@ async fn translate_image(
     Ok(HttpResponse::Ok()
         .content_type("image/png")
         .body(buffer))
+}
+
+// 将图像转换为PNG格式的辅助函数
+fn image_to_png(image: &koharu::image::SerializableDynamicImage) -> Result<Vec<u8>, image::ImageError> {
+    let mut buffer = Vec::new();
+    image.write_to(&mut std::io::Cursor::new(&mut buffer), image::ImageFormat::Png)?;
+    Ok(buffer)
+}
+
+// 构造二进制消息的辅助函数
+fn build_message(message_type: u8, data: &[u8]) -> Vec<u8> {
+    let mut message = Vec::with_capacity(5 + data.len());
+    message.push(message_type);
+    let size = data.len() as u32;
+    message.extend_from_slice(&size.to_be_bytes()); // 大端格式
+    message.extend_from_slice(data);
+    message
+}
+
+// API端点：图像翻译 - 流式响应版本
+async fn translate_image_stream(
+    data: Data<AppState>,
+    MultipartForm(form): MultipartForm<TranslateRequest>,
+) -> actix_web::Result<impl Responder> {
+    use actix_web::body::MessageBody;
+
+        // 加载图像
+        let image_data = std::fs::read(form.image.file.path())?;
+        let dynamic_image = image::load_from_memory(&image_data)
+            .map_err(|e| actix_web::error::ErrorInternalServerError(e))?;
+        let serializable_image = koharu::image::SerializableDynamicImage::from(dynamic_image);
+
+        // 创建临时文档
+        let id = blake3::hash(&image_data).to_hex().to_string();
+        let (width, height) = serializable_image.0.dimensions();
+        let mut document = Document {
+            id,
+            path: std::path::PathBuf::new(),
+            name: "temp".to_string(),
+            image: serializable_image.clone(),
+            width,
+            height,
+            ..Default::default()
+        };
+
+        // 使用actix-web的流响应
+        Ok(HttpResponse::Ok()
+            .content_type("application/octet-stream")
+            .streaming(async move {
+                // 步骤3：检测对话框
+                let (text_blocks, segment) = match data.model.detect_dialog(&serializable_image).await {
+                    Ok(result) => result,
+                    Err(e) => {
+                        let msg = build_message(2, format!("Dialog detection failed: {}", e).as_bytes());
+                        return Ok(actix_web::body::BodyStreamChunk::Last(msg.into()));
+                    }
+                };
+                document.text_blocks = text_blocks;
+                document.segment = Some(segment);
+
+                // 步骤4：OCR识别
+                let text_blocks = match data.model.ocr(&serializable_image, &document.text_blocks).await {
+                    Ok(result) => result,
+                    Err(e) => {
+                        let msg = build_message(2, format!("OCR failed: {}", e).as_bytes());
+                        return Ok(actix_web::body::BodyStreamChunk::Last(msg.into()));
+                    }
+                };
+                document.text_blocks = text_blocks;
+
+                // 步骤5：图像修复(Inpaint)
+                let segment = match document.segment.as_ref() {
+                    Some(seg) => seg,
+                    None => {
+                        let msg = build_message(2, b"Segment not found");
+                        return Ok(actix_web::body::BodyStreamChunk::Last(msg.into()));
+                    }
+                };
+
+                let mut segment_data = segment.to_rgba8();
+                let (seg_width, seg_height) = segment_data.dimensions();
+                for y in 0..seg_height {
+                    for x in 0..seg_width {
+                        let pixel = segment_data.get_pixel_mut(x, y);
+                        if pixel.0 != [0, 0, 0, 255] {
+                            let mut inside_any_block = false;
+                            for block in &document.text_blocks {
+                                if x >= block.x as u32
+                                    && x < (block.x + block.width) as u32
+                                    && y >= block.y as u32
+                                    && y < (block.y + block.height) as u32
+                                {
+                                    inside_any_block = true;
+                                    break;
+                                }
+                            }
+                            if !inside_any_block {
+                                *pixel = image::Rgba([0, 0, 0, 255]);
+                            }
+                        }
+                    }
+                }
+
+                let mask = koharu::image::SerializableDynamicImage::from(DynamicImage::ImageRgba8(segment_data));
+                let inpainted = match data.model.inpaint(&serializable_image, &mask).await {
+                    Ok(result) => result,
+                    Err(e) => {
+                        let msg = build_message(2, format!("Inpaint failed: {}", e).as_bytes());
+                        return Ok(actix_web::body::BodyStreamChunk::Last(msg.into()));
+                    }
+                };
+                document.inpainted = Some(inpainted);
+
+                // 步骤6：翻译文本
+                if !data.llm_model.ready().await {
+                    let msg = build_message(2, b"LLM model is not ready yet");
+                    return Ok(actix_web::body::BodyStreamChunk::Last(msg.into()));
+                }
+
+                if let Err(e) = data.llm_model.generate(&mut document).await {
+                    let msg = build_message(2, format!("Translation failed: {}", e).as_bytes());
+                    return Ok(actix_web::body::BodyStreamChunk::Last(msg.into()));
+                }
+
+                // 步骤7：渲染翻译后的文本
+                if let Err(e) = data.renderer.render(&mut document, None, Default::default()) {
+                    let msg = build_message(2, format!("Render failed: {}", e).as_bytes());
+                    return Ok(actix_web::body::BodyStreamChunk::Last(msg.into()));
+                }
+
+                // 步骤8：返回结果图像
+                match document.rendered.as_ref() {
+                    Some(rendered_image) => match image_to_png(rendered_image) {
+                        Ok(png_data) => {
+                            let msg = build_message(0, &png_data);
+                            Ok(actix_web::body::BodyStreamChunk::Last(msg.into()))
+                        }
+                        Err(e) => {
+                            let msg = build_message(2, format!("Image conversion failed: {}", e).as_bytes());
+                            Ok(actix_web::body::BodyStreamChunk::Last(msg.into()))
+                        }
+                    },
+                    None => {
+                        let msg = build_message(2, b"Rendered image not found");
+                        Ok(actix_web::body::BodyStreamChunk::Last(msg.into()))
+                    }
+                }
+            }))
 }
 
 // CLI命令行参数
@@ -275,7 +422,7 @@ async fn main() -> Result<()> {
             .wrap(Cors::permissive())  // 允许所有CORS请求
             .app_data(app_state.clone())  // 共享应用程序状态
             .service(web::resource("/translate/with-form/image/stream")  // API端点路径 (流式响应)
-                .route(web::post().to(translate_image))  // POST请求处理函数
+                .route(web::post().to(translate_image_stream))  // POST请求处理函数
             )
             .service(web::resource("/translate/with-form/image")  // API端点路径 (非流式响应)
                 .route(web::post().to(translate_image))  // POST请求处理函数
