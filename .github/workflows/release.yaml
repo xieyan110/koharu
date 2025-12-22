@@ -46,23 +46,13 @@ jobs:
       - name: Prepare bundled artifacts
         shell: bash
         run: |
-          # Create a directory for bundled artifacts
           mkdir -p bundled-artifacts
-
-          # Copy the web executable
           cp target/release/koharu-web.exe bundled-artifacts/
-
-          # Create .portable file to enable portable mode
           touch bundled-artifacts/.portable
-
-          # Run the web app with -d to download CUDA dependencies
           cd bundled-artifacts
           ./koharu-web.exe -d
-
-          # Create the bundled archive
           echo "Creating CUDA bundled archive..."
           7z a ../Releases/Koharu-web-win-CUDA-Bundled.7z -x!models/*/blobs '-x!*.log' * .portable
-
       - name: Upload Bundled Artifacts
         uses: softprops/action-gh-release@v2
         with:
@@ -70,11 +60,8 @@ jobs:
           make_latest: false
         env:
           token: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Upload koharu-web.exe as artifact
         uses: actions/upload-artifact@v4
         with:
           name: koharu-web-cuda
           path: target/release/koharu-web.exe
-
-
