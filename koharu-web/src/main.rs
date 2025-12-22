@@ -9,7 +9,7 @@ use actix_web::{
     web::{self, Data},
     App, HttpServer, HttpResponse, Responder,
 };
-use actix_multipart::{Multipart, form::tempfile::TempFile, form::MultipartForm};
+use actix_multipart::{Multipart, form::{MultipartForm, tempfile::TempFile, text::Text}};
 use anyhow::Result;
 use image::{DynamicImage, GenericImageView};
 use once_cell::sync::Lazy;
@@ -121,7 +121,8 @@ async fn preload() -> Result<()> {
 struct TranslateRequest {
     #[multipart(rename = "image")]  // 表单字段名称为image
     image: TempFile,                // 上传的图像文件
-    // 可以在此处添加其他参数
+    #[multipart(rename = "config")]  // 表单字段名称为config，用于接收JSON配置
+    config: Option<Text<String>>,         // 配置字符串，前端可能会传递，但我们会忽略
 }
 
 // API端点：图像翻译
@@ -273,11 +274,18 @@ async fn main() -> Result<()> {
         App::new()
             .wrap(Cors::permissive())  // 允许所有CORS请求
             .app_data(app_state.clone())  // 共享应用程序状态
-            .service(web::resource("/translate/with-form/image/stream")  // API端点路径
+            .service(web::resource("/translate/with-form/image/stream")  // API端点路径 (流式响应)
                 .route(web::post().to(translate_image))  // POST请求处理函数
             )
+            .service(web::resource("/translate/with-form/image")  // API端点路径 (非流式响应)
+                .route(web::post().to(translate_image))  // POST请求处理函数
+            )
+            // 添加旧版 manga-image-translator 支持的API端点
+            .service(web::resource("/").route(web::get().to(|| async {
+                HttpResponse::Ok().body(r#"<html><body>validTranslators: ['SakuraGalTransl7Bv3_7'],</body></html>"#)
+            })))
     })
-    .bind(("0.0.0.0", 12345))?  // 绑定到所有接口的12345端口
+    .bind(("0.0.0.0", 5003))?  // 绑定到所有接口的5003端口
     .run()
     .await?;
 
