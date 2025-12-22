@@ -14,116 +14,67 @@ env:
   CUDA_COMPUTE_CAP: 75
 
 jobs:
-  build-windows:
-    name: Windows
+  build-windows-web:
+    name: Windows Web
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: oven-sh/setup-bun@v2
       - uses: Jimver/cuda-toolkit@master
         with:
           cuda: '12.9.1'
           method: 'network'
           sub-packages: '["cudart", "cublas", "cufft", "nvcc"]'
       - uses: ilammy/msvc-dev-cmd@v1
-      - run: bun install
-      - run: bun tauri build --features=cuda,cudnn,bundle
+      - name: Build koharu-web with CUDA
+        run: cargo build --release -p koharu-web --features=cuda,cudnn
       - name: Prepare distribution folder
         shell: bash
         run: |
           mkdir dist
-          cp target/release/koharu.exe dist/
-      - name: Package
+          cp target/release/koharu-web.exe dist/
+      - name: Package and upload to Release
         shell: bash
-        env:
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
         run: |
           dotnet tool update -g vpk
-          vpk pack -u Koharu -v ${{ github.ref_name }} -p dist -e koharu.exe -i koharu/icons/icon.ico \
-            --azureTrustedSignFile .github/signing/metadata.json
+          vpk pack -u Koharu -v ${{ github.ref_name }} -p dist -e koharu-web.exe -i koharu/icons/icon.ico
           vpk upload github \
             --repoUrl https://github.com/${{ github.repository }} \
             --releaseName ${{ github.ref_name }} \
             --tag ${{ github.ref_name }} \
             --token ${{ secrets.GITHUB_TOKEN }} \
             --merge
-
       - name: Prepare bundled artifacts
         shell: bash
         run: |
-          7z x Releases/Koharu-win-Portable.zip -obundled-artifacts
-          cd bundled-artifacts
-          ./current/koharu.exe -d
-          echo "Creating archive, check back in 20 years later"
-          # skip blobs, let 7z copy the resolved symlink instead; and use spf to strip leading folder
-          7z a ../Releases/Koharu-win-CUDA-Bundled.7z -x!models/*/blobs '-x!*.log' * .portable
+          # Create a directory for bundled artifacts
+          mkdir -p bundled-artifacts
 
-      # upload Releases/Koharu-win-Bundled.zip to release artifacts
+          # Copy the web executable
+          cp target/release/koharu-web.exe bundled-artifacts/
+
+          # Create .portable file to enable portable mode
+          touch bundled-artifacts/.portable
+
+          # Run the web app with -d to download CUDA dependencies
+          cd bundled-artifacts
+          ./koharu-web.exe -d
+
+          # Create the bundled archive
+          echo "Creating CUDA bundled archive..."
+          7z a ../Releases/Koharu-web-win-CUDA-Bundled.7z -x!models/*/blobs '-x!*.log' * .portable
+
       - name: Upload Bundled Artifacts
         uses: softprops/action-gh-release@v2
         with:
-          files: Releases/Koharu-win-CUDA-Bundled.7z
+          files: Releases/Koharu-web-win-CUDA-Bundled.7z
           make_latest: false
         env:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Upload koharu-web.exe as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: koharu-web-cuda
+          path: target/release/koharu-web.exe
 
-  build-macos:
-    name: macOS
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: oven-sh/setup-bun@v2
-      - run: bun install
-      - run: bun tauri build --features=metal,bundle
-      - name: Prepare distribution folder
-        run: |
-          mkdir dist
-          cp target/release/koharu dist/
-      - name: Install Apple certificates and notary profile
-        env:
-          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
-          INSTALLER_CERTIFICATE_BASE64: ${{ secrets.INSTALLER_CERTIFICATE_BASE64 }}
-          P12_PASSWORD: ""
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM: ${{ secrets.APPLE_TEAM }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-        run: |
-          # create variables for file paths
-          CERT_BUILD_PATH=$RUNNER_TEMP/build_certificate.p12
-          CERT_INSTALLER_PATH=$RUNNER_TEMP/installer_certificate.p12
-          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
 
-          # import certificates from secrets
-          echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode -o $CERT_BUILD_PATH
-          echo -n "$INSTALLER_CERTIFICATE_BASE64" | base64 --decode -o $CERT_INSTALLER_PATH
-
-          # create temporary keychain
-          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
-          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
-
-          # import certificates to keychain
-          security import $CERT_BUILD_PATH -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
-          security import $CERT_INSTALLER_PATH -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
-          security list-keychain -d user -s $KEYCHAIN_PATH
-
-          # create notarytool profile
-          xcrun notarytool store-credentials --keychain $KEYCHAIN_PATH --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM" --password "$APPLE_PASSWORD" velopack-profile
-      - name: Package
-        run: |
-          dotnet tool update -g vpk
-          vpk pack -u Koharu -v ${{ github.ref_name }} -p dist -e koharu -i koharu/icons/icon.icns \
-            --signAppIdentity "Developer ID Application: Mayo Takanashi" \
-            --signInstallIdentity "Developer ID Installer: Mayo Takanashi" \
-            --notaryProfile "velopack-profile" \
-            --keychain $RUNNER_TEMP/app-signing.keychain-db
-          vpk upload github \
-            --repoUrl https://github.com/${{ github.repository }} \
-            --releaseName ${{ github.ref_name }} \
-            --tag ${{ github.ref_name }} \
-            --token ${{ secrets.GITHUB_TOKEN }} \
-            --merge

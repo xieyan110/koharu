@@ -5,6 +5,7 @@ members = [
     "koharu-ml",
     "koharu-runtime",
     "koharu-renderer",
+    "koharu-web",
 ]
 default-members = ["koharu"]
 resolver = "3"
