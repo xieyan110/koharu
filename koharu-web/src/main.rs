@@ -229,10 +229,11 @@ async fn translate_image(
     document.inpainted = Some(inpainted);  // 保存修复后的图像
 
     // 步骤6：翻译文本（使用默认的SakuraGalTransl7Bv3_7模型）
-    // 确保LLM模型已经准备好
+    // 确保LLM模型已经准备好，如果未准备好则加载
     if !data.llm_model.ready().await {
-        error!("LLM模型尚未准备就绪");
-        return Err(actix_web::error::ErrorInternalServerError("LLM模型尚未准备就绪"));
+        info!("LLM模型尚未加载，开始加载SakuraGalTransl7Bv3_7模型...");
+        data.llm_model.load(ModelId::SakuraGalTransl7Bv3_7).await;
+        info!("SakuraGalTransl7Bv3_7模型加载完成");
     }
 
     // 使用LLM模型翻译文本块
@@ -406,9 +407,9 @@ async fn translate_image_stream(
 
                 // 步骤6：翻译文本
                 if !data.llm_model.ready().await {
-                    let msg = build_message(2, b"LLM模型尚未准备就绪");
-                    error!("LLM模型尚未准备就绪");
-                    return Ok(actix_web::body::BodyStreamChunk::Last(msg.into()));
+                    info!("LLM模型尚未加载，开始加载SakuraGalTransl7Bv3_7模型...");
+                    data.llm_model.load(ModelId::SakuraGalTransl7Bv3_7).await;
+                    info!("SakuraGalTransl7Bv3_7模型加载完成");
                 }
 
                 if let Err(e) = data.llm_model.generate(&mut document).await {
@@ -478,8 +479,7 @@ async fn main() -> Result<()> {
     let llm_model = Arc::new(LLMModel::new(use_cpu));  // 创建LLM模型实例，用于文本翻译
     let renderer = Arc::new(Renderer::new()?);  // 创建渲染器实例
 
-    // 加载默认的翻译模型SakuraGalTransl7Bv3_7
-    llm_model.load(ModelId::SakuraGalTransl7Bv3_7).await;
+    // 默认不加载翻译模型，将在API请求时按需加载
 
     // 创建应用程序状态
     let app_state = Data::new(AppState { model, llm_model, renderer });
