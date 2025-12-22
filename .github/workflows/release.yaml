@@ -19,19 +19,54 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
+
+      # ========== 新增：缓存 Rust Cargo 依赖（核心优化） ==========
+      - name: Cache Cargo dependencies and build artifacts
+        uses: actions/cache@v4
+        id: cache-cargo
+        with:
+          # Windows 下 Cargo 缓存路径 + Rust 编译产物路径
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          # 缓存键：系统 + Cargo.lock 哈希（依赖变更才重建缓存）
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ env.CUDA_COMPUTE_CAP }}
+          # 回退键：匹配同系统的最新 Cargo 缓存
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ env.CUDA_COMPUTE_CAP }}-
+            ${{ runner.os }}-cargo-
+
+      # ========== 新增：缓存 CUDA Toolkit（可选，进一步提速） ==========
+      - name: Cache CUDA Toolkit
+        id: cache-cuda
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:\Program Files\NVIDIA GPU Computing Toolkit
+            C:\ProgramData\NVIDIA\CUDA Cache
+          key: ${{ runner.os }}-cuda-12.9.1-${{ env.CUDA_COMPUTE_CAP }}
+          restore-keys: |
+            ${{ runner.os }}-cuda-12.9.1-
+            ${{ runner.os }}-cuda-
+
       - uses: Jimver/cuda-toolkit@master
         with:
           cuda: '12.9.1'
           method: 'network'
           sub-packages: '["cudart", "cublas", "cufft", "nvcc"]'
+
       - uses: ilammy/msvc-dev-cmd@v1
+      
       - name: Build koharu-web with CUDA
         run: cargo build --release -p koharu-web --features=cuda,cudnn
+      
       - name: Prepare distribution folder
         shell: bash
         run: |
           mkdir dist
           cp target/release/koharu-web.exe dist/
+      
       - name: Package and upload to Release
         shell: bash
         run: |
@@ -43,6 +78,7 @@ jobs:
             --tag ${{ github.ref_name }} \
             --token ${{ secrets.GITHUB_TOKEN }} \
             --merge
+      
       - name: Prepare bundled artifacts
         shell: bash
         run: |
@@ -53,6 +89,7 @@ jobs:
           ./koharu-web.exe -d
           echo "Creating CUDA bundled archive..."
           7z a ../Releases/Koharu-web-win-CUDA-Bundled.7z -x!models/*/blobs '-x!*.log' * .portable
+      
       - name: Upload Bundled Artifacts
         uses: softprops/action-gh-release@v2
         with:
@@ -60,6 +97,7 @@ jobs:
           make_latest: false
         env:
           token: ${{ secrets.GITHUB_TOKEN }}
+      
       - name: Upload koharu-web.exe as artifact
         uses: actions/upload-artifact@v4
         with:
