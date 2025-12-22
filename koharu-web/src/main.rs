@@ -10,7 +10,7 @@ use actix_web::{
 };
 use actix_multipart::{Multipart, form::tempfile::TempFile, form::MultipartForm};
 use anyhow::Result;
-use image::DynamicImage;
+use image::{DynamicImage, GenericImageView};
 use once_cell::sync::Lazy;
 use tracing_subscriber::filter::EnvFilter;
 
@@ -120,13 +120,14 @@ async fn translate_image(
     MultipartForm(form): MultipartForm<TranslateRequest>,
 ) -> actix_web::Result<impl Responder> {
     // Step 1: Load the image
-    let image_data = std::fs::read(form.image.path())?;
-    let dynamic_image = image::load_from_memory(&image_data)?;
+    let image_data = std::fs::read(form.image.file.path())?;
+    let dynamic_image = image::load_from_memory(&image_data)
+        .map_err(|e| actix_web::error::ErrorInternalServerError(e))?;
     let serializable_image = koharu::image::SerializableDynamicImage::from(dynamic_image);
 
     // Step 2: Create a temporary document
     let id = blake3::hash(&image_data).to_hex().to_string();
-    let (width, height) = serializable_image.dimensions();
+    let (width, height) = serializable_image.0.dimensions();
     let mut document = Document {
         id,
         path: std::path::PathBuf::new(),
@@ -195,7 +196,9 @@ async fn translate_image(
         .ok_or_else(|| actix_web::error::ErrorInternalServerError("Rendered image not found"))?;
 
     let mut buffer = Vec::new();
-    rendered_image.write_to(&mut buffer, image::ImageOutputFormat::Png)?;
+    let mut cursor = std::io::Cursor::new(&mut buffer);
+    rendered_image.write_to(&mut cursor, image::ImageFormat::Png)
+        .map_err(|e| actix_web::error::ErrorInternalServerError(e))?;
 
     Ok(HttpResponse::Ok()
         .content_type("image/png")

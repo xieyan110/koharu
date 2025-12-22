@@ -4241,8 +4241,10 @@ dependencies = [
  "actix-web",
  "anyhow",
  "blake3",
+ "clap",
  "dirs",
  "image",
+ "koharu",
  "koharu-core",
  "koharu-ml",
  "koharu-renderer",
@@ -4251,6 +4253,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

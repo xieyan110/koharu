@@ -4,10 +4,13 @@ version = "0.22.0"
 edition = "2024"
 
 [dependencies]
+koharu = { path = "../koharu", default-features = false }
 koharu-core = { path = "../koharu-core", default-features = false }
 koharu-runtime = { path = "../koharu-runtime", default-features = false }
 koharu-ml = { path = "../koharu-ml", default-features = false }
 koharu-renderer = { path = "../koharu-renderer", default-features = false }
+clap = { version = "4.5", features = ["derive"] }
+windows-sys = "0.61"
 
 actix-web = "4"
 actix-multipart = "0.6"
