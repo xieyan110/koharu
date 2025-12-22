@@ -465,7 +465,7 @@ async fn main() -> Result<()> {
     let renderer = Arc::new(Renderer::new()?);  // 创建渲染器实例
 
     // 默认不加载翻译模型，将在API请求时按需加载
-
+    llm_model.load(ModelId::SakuraGalTransl7Bv3_7).await;
     // 创建应用程序状态
     let app_state = Data::new(AppState { model, llm_model, renderer });
 
