@@ -4259,6 +4259,7 @@ dependencies = [
  "blake3",
  "clap",
  "dirs",
+ "futures",
  "image",
  "koharu",
  "koharu-core",

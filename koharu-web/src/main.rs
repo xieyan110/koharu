@@ -3,13 +3,13 @@ extern crate tracing;
 
 use std::sync::Arc;
 
-use clap::{Parser, arg};
+use clap::Parser;
 use actix_cors::Cors;
 use actix_web::{
     web::{self, Data},
     App, HttpServer, HttpResponse, Responder,
 };
-use actix_multipart::{Multipart, form::{MultipartForm, tempfile::TempFile, text::Text}};
+use actix_multipart::form::{MultipartForm, tempfile::TempFile, text::Text};
 use anyhow::Result;
 use image::{DynamicImage, GenericImageView};
 use once_cell::sync::Lazy;
@@ -19,8 +19,8 @@ use koharu_ml::{cuda_is_available, llm::ModelId};
 use koharu_runtime::{ensure_dylibs, preload_dylibs};
 use koharu::ml::Model as KoharuModel;
 use koharu::renderer::Renderer;
-use koharu::llm::{self, Model as LLMModel};
-use koharu::state::{Document, TextStyle};
+use koharu::llm::Model as LLMModel;
+use koharu::state::Document;
 
 // 应用程序状态结构体，用于在Actix Web应用中共享模型和渲染器
 struct AppState {
@@ -303,7 +303,6 @@ async fn translate_image_stream(
     data: Data<AppState>,
     MultipartForm(form): MultipartForm<TranslateRequest>,
 ) -> actix_web::Result<impl Responder> {
-    use actix_web::body::MessageBody;
 
         // 加载图像
         let image_data = std::fs::read(form.image.file.path())?;
@@ -327,17 +326,14 @@ async fn translate_image_stream(
         // 使用actix-web的流响应
         Ok(HttpResponse::Ok()
             .content_type("application/octet-stream")
-            .streaming(async move {
+            .streaming(futures::stream::once(async move {
                 // 步骤3：检测对话框
                 let (text_blocks, segment) = match data.model.detect_dialog(&serializable_image).await {
-                    Ok(result) => {
-                        debug!("对话框检测成功，找到 {} 个文本块", result.0.len());
-                        result
-                    },
+                    Ok(result) => result,
                     Err(e) => {
                         let msg = build_message(2, format!("对话框检测失败: {}", e).as_bytes());
                         error!("对话框检测失败: {}", e);
-                        return Ok(actix_web::body::BodyStreamChunk::Last(msg.into()));
+                        return Ok::<actix_web::web::Bytes, actix_web::Error>(actix_web::web::Bytes::from(msg));
                     }
                 };
                 document.text_blocks = text_blocks;
@@ -345,14 +341,11 @@ async fn translate_image_stream(
 
                 // 步骤4：OCR识别
                 let text_blocks = match data.model.ocr(&serializable_image, &document.text_blocks).await {
-                    Ok(result) => {
-                        debug!("OCR识别成功，识别 {} 个文本块", result.len());
-                        result
-                    },
+                    Ok(result) => result,
                     Err(e) => {
                         let msg = build_message(2, format!("OCR识别失败: {}", e).as_bytes());
                         error!("OCR识别失败: {}", e);
-                        return Ok(actix_web::body::BodyStreamChunk::Last(msg.into()));
+                        return Ok::<actix_web::web::Bytes, actix_web::Error>(actix_web::web::Bytes::from(msg));
                     }
                 };
                 document.text_blocks = text_blocks;
@@ -361,9 +354,9 @@ async fn translate_image_stream(
                 let segment = match document.segment.as_ref() {
                     Some(seg) => seg,
                     None => {
-                        let msg = build_message(2, b"分割结果不存在");
+                        let msg = build_message(2, "分割结果不存在".as_bytes());
                         error!("分割结果不存在");
-                        return Ok(actix_web::body::BodyStreamChunk::Last(msg.into()));
+                        return Ok::<actix_web::web::Bytes, actix_web::Error>(actix_web::web::Bytes::from(msg));
                     }
                 };
 
@@ -393,14 +386,11 @@ async fn translate_image_stream(
 
                 let mask = koharu::image::SerializableDynamicImage::from(DynamicImage::ImageRgba8(segment_data));
                 let inpainted = match data.model.inpaint(&serializable_image, &mask).await {
-                    Ok(result) => {
-                        debug!("图像修复成功");
-                        result
-                    },
+                    Ok(result) => result,
                     Err(e) => {
                         let msg = build_message(2, format!("图像修复失败: {}", e).as_bytes());
                         error!("图像修复失败: {}", e);
-                        return Ok(actix_web::body::BodyStreamChunk::Last(msg.into()));
+                        return Ok::<actix_web::web::Bytes, actix_web::Error>(actix_web::web::Bytes::from(msg));
                     }
                 };
                 document.inpainted = Some(inpainted);
@@ -415,41 +405,36 @@ async fn translate_image_stream(
                 if let Err(e) = data.llm_model.generate(&mut document).await {
                     let msg = build_message(2, format!("文本翻译失败: {}", e).as_bytes());
                     error!("文本翻译失败: {}", e);
-                    return Ok(actix_web::body::BodyStreamChunk::Last(msg.into()));
-                } else {
-                    debug!("文本翻译成功");
+                    return Ok::<actix_web::web::Bytes, actix_web::Error>(actix_web::web::Bytes::from(msg));
                 }
 
                 // 步骤7：渲染翻译后的文本
                 if let Err(e) = data.renderer.render(&mut document, None, Default::default()) {
                     let msg = build_message(2, format!("图像渲染失败: {}", e).as_bytes());
                     error!("图像渲染失败: {}", e);
-                    return Ok(actix_web::body::BodyStreamChunk::Last(msg.into()));
-                } else {
-                    debug!("图像渲染成功");
+                    return Ok::<actix_web::web::Bytes, actix_web::Error>(actix_web::web::Bytes::from(msg));
                 }
 
                 // 步骤8：返回结果图像
                 match document.rendered.as_ref() {
                     Some(rendered_image) => match image_to_png(rendered_image) {
                         Ok(png_data) => {
-                            info!("图像处理完成，返回结果图像");
                             let msg = build_message(0, &png_data);
-                            Ok(actix_web::body::BodyStreamChunk::Last(msg.into()))
+                            Ok::<actix_web::web::Bytes, actix_web::Error>(actix_web::web::Bytes::from(msg))
                         }
                         Err(e) => {
                             let msg = build_message(2, format!("图像转换失败: {}", e).as_bytes());
                             error!("图像转换失败: {}", e);
-                            Ok(actix_web::body::BodyStreamChunk::Last(msg.into()))
+                            Ok::<actix_web::web::Bytes, actix_web::Error>(actix_web::web::Bytes::from(msg))
                         }
                     },
                     None => {
-                        let msg = build_message(2, b"渲染后的图像不存在");
+                        let msg = build_message(2, "渲染后的图像不存在".as_bytes());
                         error!("渲染后的图像不存在");
-                        Ok(actix_web::body::BodyStreamChunk::Last(msg.into()))
+                        Ok::<actix_web::web::Bytes, actix_web::Error>(actix_web::web::Bytes::from(msg))
                     }
                 }
-            }))
+            })))
 }
 
 // CLI命令行参数
