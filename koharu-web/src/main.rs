@@ -132,8 +132,15 @@ async fn translate_image(
 ) -> actix_web::Result<impl Responder> {
     // 步骤1：加载图像
     let image_data = std::fs::read(form.image.file.path())?;  // 读取临时文件
+    debug!("图像文件读取成功，大小为 {} 字节", image_data.len());
+
     let dynamic_image = image::load_from_memory(&image_data)  // 将图像数据加载为DynamicImage
-        .map_err(|e| actix_web::error::ErrorInternalServerError(e))?;
+        .map_err(|e| {
+            error!("图像加载失败: {}", e);
+            actix_web::error::ErrorInternalServerError(e)
+        })?;
+
+    debug!("图像加载成功，尺寸为 {}x{}", dynamic_image.width(), dynamic_image.height());
     let serializable_image = koharu::image::SerializableDynamicImage::from(dynamic_image);  // 转换为可序列化图像格式
 
     // 步骤2：创建临时文档
@@ -153,14 +160,24 @@ async fn translate_image(
     // 步骤3：检测对话框
     // 使用模型检测图像中的对话框区域和文本块
     let (text_blocks, segment) = data.model.detect_dialog(&serializable_image).await
-        .map_err(|e| actix_web::error::ErrorInternalServerError(e))?;
+        .map_err(|e| {
+            error!("对话框检测失败: {}", e);
+            actix_web::error::ErrorInternalServerError(e)
+        })?;
+
+    debug!("对话框检测成功，找到 {} 个文本块", text_blocks.len());
     document.text_blocks = text_blocks;  // 保存检测到的文本块
     document.segment = Some(segment);  // 保存分割结果
 
     // 步骤4：OCR识别
     // 对检测到的文本块进行光学字符识别
     let text_blocks = data.model.ocr(&serializable_image, &document.text_blocks).await
-        .map_err(|e| actix_web::error::ErrorInternalServerError(e))?;
+        .map_err(|e| {
+            error!("OCR识别失败: {}", e);
+            actix_web::error::ErrorInternalServerError(e)
+        })?;
+
+    debug!("OCR识别成功，识别 {} 个文本块", text_blocks.len());
     document.text_blocks = text_blocks;  // 保存识别后的文本块
 
     // 步骤5：图像修复(Inpaint)
@@ -202,34 +219,62 @@ async fn translate_image(
     let mask = koharu::image::SerializableDynamicImage::from(DynamicImage::ImageRgba8(segment_data));
     // 使用模型对图像进行修复，填充文本区域
     let inpainted = data.model.inpaint(&serializable_image, &mask).await
-        .map_err(|e| actix_web::error::ErrorInternalServerError(e))?;
+        .map_err(|e| {
+            error!("图像修复失败: {}", e);
+            actix_web::error::ErrorInternalServerError(e)
+        })?;
+
+    debug!("图像修复成功");
+
     document.inpainted = Some(inpainted);  // 保存修复后的图像
 
     // 步骤6：翻译文本（使用默认的SakuraGalTransl7Bv3_7模型）
     // 确保LLM模型已经准备好
     if !data.llm_model.ready().await {
-        return Err(actix_web::error::ErrorInternalServerError("LLM model is not ready yet"));
+        error!("LLM模型尚未准备就绪");
+        return Err(actix_web::error::ErrorInternalServerError("LLM模型尚未准备就绪"));
     }
 
     // 使用LLM模型翻译文本块
     data.llm_model.generate(&mut document).await
-        .map_err(|e| actix_web::error::ErrorInternalServerError(e))?;
+        .map_err(|e| {
+            error!("文本翻译失败: {}", e);
+            actix_web::error::ErrorInternalServerError(e)
+        })?;
+
+    debug!("文本翻译成功");
+
 
     // 步骤7：渲染翻译后的文本
     data.renderer.render(&mut document, None, Default::default())
-        .map_err(|e| actix_web::error::ErrorInternalServerError(e))?;
+        .map_err(|e| {
+            error!("图像渲染失败: {}", e);
+            actix_web::error::ErrorInternalServerError(e)
+        })?;
+
+    debug!("图像渲染成功");
+
 
     // 获取渲染后的图像
     let rendered_image = document.rendered.as_ref()
-        .ok_or_else(|| actix_web::error::ErrorInternalServerError("Rendered image not found"))?;
+        .ok_or_else(|| {
+            error!("渲染后的图像不存在");
+            actix_web::error::ErrorInternalServerError("渲染后的图像不存在")
+        })?;
 
     // 将渲染后的图像转换为PNG格式
     let mut buffer = Vec::new();
     let mut cursor = std::io::Cursor::new(&mut buffer);
     rendered_image.write_to(&mut cursor, image::ImageFormat::Png)
-        .map_err(|e| actix_web::error::ErrorInternalServerError(e))?;
+        .map_err(|e| {
+            error!("图像转换失败: {}", e);
+            actix_web::error::ErrorInternalServerError(e)
+        })?;
+
+    debug!("图像转换成功，PNG大小为 {} 字节", buffer.len());
 
     // 返回PNG图像响应
+    info!("图像处理完成，返回结果图像");
     Ok(HttpResponse::Ok()
         .content_type("image/png")
         .body(buffer))
@@ -284,9 +329,13 @@ async fn translate_image_stream(
             .streaming(async move {
                 // 步骤3：检测对话框
                 let (text_blocks, segment) = match data.model.detect_dialog(&serializable_image).await {
-                    Ok(result) => result,
+                    Ok(result) => {
+                        debug!("对话框检测成功，找到 {} 个文本块", result.0.len());
+                        result
+                    },
                     Err(e) => {
-                        let msg = build_message(2, format!("Dialog detection failed: {}", e).as_bytes());
+                        let msg = build_message(2, format!("对话框检测失败: {}", e).as_bytes());
+                        error!("对话框检测失败: {}", e);
                         return Ok(actix_web::body::BodyStreamChunk::Last(msg.into()));
                     }
                 };
@@ -295,9 +344,13 @@ async fn translate_image_stream(
 
                 // 步骤4：OCR识别
                 let text_blocks = match data.model.ocr(&serializable_image, &document.text_blocks).await {
-                    Ok(result) => result,
+                    Ok(result) => {
+                        debug!("OCR识别成功，识别 {} 个文本块", result.len());
+                        result
+                    },
                     Err(e) => {
-                        let msg = build_message(2, format!("OCR failed: {}", e).as_bytes());
+                        let msg = build_message(2, format!("OCR识别失败: {}", e).as_bytes());
+                        error!("OCR识别失败: {}", e);
                         return Ok(actix_web::body::BodyStreamChunk::Last(msg.into()));
                     }
                 };
@@ -307,7 +360,8 @@ async fn translate_image_stream(
                 let segment = match document.segment.as_ref() {
                     Some(seg) => seg,
                     None => {
-                        let msg = build_message(2, b"Segment not found");
+                        let msg = build_message(2, b"分割结果不存在");
+                        error!("分割结果不存在");
                         return Ok(actix_web::body::BodyStreamChunk::Last(msg.into()));
                     }
                 };
@@ -338,9 +392,13 @@ async fn translate_image_stream(
 
                 let mask = koharu::image::SerializableDynamicImage::from(DynamicImage::ImageRgba8(segment_data));
                 let inpainted = match data.model.inpaint(&serializable_image, &mask).await {
-                    Ok(result) => result,
+                    Ok(result) => {
+                        debug!("图像修复成功");
+                        result
+                    },
                     Err(e) => {
-                        let msg = build_message(2, format!("Inpaint failed: {}", e).as_bytes());
+                        let msg = build_message(2, format!("图像修复失败: {}", e).as_bytes());
+                        error!("图像修复失败: {}", e);
                         return Ok(actix_web::body::BodyStreamChunk::Last(msg.into()));
                     }
                 };
@@ -348,35 +406,45 @@ async fn translate_image_stream(
 
                 // 步骤6：翻译文本
                 if !data.llm_model.ready().await {
-                    let msg = build_message(2, b"LLM model is not ready yet");
+                    let msg = build_message(2, b"LLM模型尚未准备就绪");
+                    error!("LLM模型尚未准备就绪");
                     return Ok(actix_web::body::BodyStreamChunk::Last(msg.into()));
                 }
 
                 if let Err(e) = data.llm_model.generate(&mut document).await {
-                    let msg = build_message(2, format!("Translation failed: {}", e).as_bytes());
+                    let msg = build_message(2, format!("文本翻译失败: {}", e).as_bytes());
+                    error!("文本翻译失败: {}", e);
                     return Ok(actix_web::body::BodyStreamChunk::Last(msg.into()));
+                } else {
+                    debug!("文本翻译成功");
                 }
 
                 // 步骤7：渲染翻译后的文本
                 if let Err(e) = data.renderer.render(&mut document, None, Default::default()) {
-                    let msg = build_message(2, format!("Render failed: {}", e).as_bytes());
+                    let msg = build_message(2, format!("图像渲染失败: {}", e).as_bytes());
+                    error!("图像渲染失败: {}", e);
                     return Ok(actix_web::body::BodyStreamChunk::Last(msg.into()));
+                } else {
+                    debug!("图像渲染成功");
                 }
 
                 // 步骤8：返回结果图像
                 match document.rendered.as_ref() {
                     Some(rendered_image) => match image_to_png(rendered_image) {
                         Ok(png_data) => {
+                            info!("图像处理完成，返回结果图像");
                             let msg = build_message(0, &png_data);
                             Ok(actix_web::body::BodyStreamChunk::Last(msg.into()))
                         }
                         Err(e) => {
-                            let msg = build_message(2, format!("Image conversion failed: {}", e).as_bytes());
+                            let msg = build_message(2, format!("图像转换失败: {}", e).as_bytes());
+                            error!("图像转换失败: {}", e);
                             Ok(actix_web::body::BodyStreamChunk::Last(msg.into()))
                         }
                     },
                     None => {
-                        let msg = build_message(2, b"Rendered image not found");
+                        let msg = build_message(2, b"渲染后的图像不存在");
+                        error!("渲染后的图像不存在");
                         Ok(actix_web::body::BodyStreamChunk::Last(msg.into()))
                     }
                 }
