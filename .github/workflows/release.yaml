@@ -67,18 +67,6 @@ jobs:
           mkdir dist
           cp target/release/koharu-web.exe dist/
       
-      - name: Package and upload to Release
-        shell: bash
-        run: |
-          dotnet tool update -g vpk
-          vpk pack -u Koharu -v ${{ github.ref_name }} -p dist -e koharu-web.exe -i koharu/icons/icon.ico
-          vpk upload github \
-            --repoUrl https://github.com/${{ github.repository }} \
-            --releaseName ${{ github.ref_name }} \
-            --tag ${{ github.ref_name }} \
-            --token ${{ secrets.GITHUB_TOKEN }} \
-            --merge
-      
       - name: Prepare bundled artifacts
         shell: bash
         run: |
