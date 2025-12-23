@@ -11,31 +11,45 @@ export function ProcessingControls() {
     setShowSegmentationMask,
     showInpaintedImage,
     setShowInpaintedImage,
+    showBrushLayer,
+    setShowBrushLayer,
     showTextBlocksOverlay,
     setShowTextBlocksOverlay,
+    documents,
+    currentDocumentIndex,
     inpaint,
     detect,
     ocr,
   } = useAppStore()
   const { t } = useTranslation()
+  const currentDocument = documents[currentDocumentIndex]
 
   return (
     <div className='space-y-2 text-xs text-neutral-600'>
       <Separator.Root className='my-1 h-px bg-neutral-200' />
       <ToggleField
-        label={t('mask.showSegmentationMask')}
-        checked={showSegmentationMask}
-        onChange={setShowSegmentationMask}
-      />
-      <ToggleField
         label={t('mask.showInpainted')}
         checked={showInpaintedImage}
         onChange={setShowInpaintedImage}
+        disabled={currentDocument?.inpainted === undefined}
+      />
+      <ToggleField
+        label={t('mask.showSegmentationMask')}
+        checked={showSegmentationMask}
+        onChange={setShowSegmentationMask}
+        disabled={currentDocument?.segment === undefined}
+      />
+      <ToggleField
+        label={t('mask.showBrushLayer')}
+        checked={showBrushLayer}
+        onChange={setShowBrushLayer}
+        disabled={currentDocument?.inpainted === undefined}
       />
       <ToggleField
         label={t('mask.showTextBlocks')}
         checked={showTextBlocksOverlay}
         onChange={setShowTextBlocksOverlay}
+        disabled={currentDocument?.textBlocks === undefined}
       />
       <Separator.Root className='my-1 h-px bg-neutral-200' />
       <div className='flex gap-2'>
